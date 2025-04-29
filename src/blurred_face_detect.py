@@ -1,9 +1,8 @@
+import cv2
 import numpy as np
-from matplotlib import pyplot as plt
+import matplotlib.pyplot as plt
 import os
 import time
-import cv2
-from skimage.transform import probabilistic_hough_line
 from skimage.feature import canny
 from skimage.morphology import opening, closing, square
 
@@ -12,56 +11,60 @@ class BlurredFaceDetector:
     def __init__(self, data_path):
         self.data_path = data_path
 
-    def probabilistic_hough_line(self, edges, lines_image):
-        lines = probabilistic_hough_line(edges, line_length=5, line_gap=3)
-        for line in lines:
-            p0, p1 = line
-            # Detect only lines with an angle less than 1 degree and longer than 15 pixels
-            if (
-                (abs(p0[0] - p1[0]) < 1 and (abs(p0[1] - p1[1]) > 15))
-                or (abs(p0[1] - p1[1]) < 1)
-                and (abs(p0[0] - p1[0]) > 15)
-            ):
-                cv2.line(lines_image, p0, p1, (255, 255, 255), 1)
-
-        return lines_image
-
-    def rectangles_outlines(self, erode, gray_image, image):
+    def rectangles_outlines(self, erode, gray_image):
         # Detect all contours
-        contours, hierarchy = cv2.findContours(
-            erode, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
-        )
+        contours, _ = cv2.findContours(erode, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
 
-        contour_num = -1
+        rectangles = []
 
         # Filter rectangles from contours
         for contour in contours:
-            contour_num += 1
             (x, y, w, h) = cv2.boundingRect(contour)
 
-            # Select only rectangles grater than or equal 50 x 50 pixels
-            # and smaller than 3/4 of the entire image area
-            if (w >= 100 and h >= 100) and (
-                w < 3 * gray_image.shape[1] / 4 and h < 3 * gray_image.shape[0] / 4
+            # Specify number of edges
+            epsilon = 0.05 * cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, epsilon, True)
+
+            # Detect contours that are rectangles
+            if (
+                len(approx)
+                == 4  # Check number of edges (rectangle should have 4 edges)
+                and (
+                    w >= 40 and h >= 40
+                )  # Rectangles grater than or equal 40 x 40 pixels
+                and (
+                    w < gray_image.shape[1] / 2 and h < gray_image.shape[0] / 2
+                )  # Rectangles with edges shorter than 1/2 of image width/height
+                and (
+                    w > gray_image.shape[0] / 20 and h > gray_image.shape[1] / 20
+                )  # Rectangles with edges greater than 1/20 of image width/height
+                and (
+                    x + w < gray_image.shape[1]
+                    and h + y < gray_image.shape[0]
+                    and x > 0
+                    and y > 0
+                )  # Rectangles with edges that do not end or start at image edges
+                and (
+                    ((w > h) and (w < 2 * h)) or ((w < h) and (h < 2 * w))
+                )  # Rectangles with balanced proportions (not enlarged)
             ):
-                # Make sure the rectangle is not too wide or too high
-                if ((w > h) and (w < 2 * h)) or ((w < h) and (h < 2 * w)):
-                    # Make sure the area inside rectangle is blurred and is not inside other rectangle
-                    rectangle_area = gray_image[y : y + h, x : x + w]
-                    fft_image = np.fft.fft2(rectangle_area)
-                    fft_shifted = np.fft.fftshift(fft_image)
-                    magnitude_spectrum = 20 * np.log(np.abs(fft_shifted))
-                    if (
-                        np.mean(magnitude_spectrum) > 100
-                        and hierarchy[0][contour_num][3] == -1
-                    ):
-                        cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 3)
-                        print(np.mean(magnitude_spectrum))
+                # Rectangle surrounding the blurred area
+                rectangle_area = gray_image[y : y + h, x : x + w]
+                fft_image = np.fft.fft2(rectangle_area)
+                fft_shifted = np.fft.fftshift(fft_image)
+                magnitude_spectrum = 20 * np.log(np.abs(fft_shifted))
+                if np.mean(magnitude_spectrum) > 95:
+                    epsilon = 0.05 * cv2.arcLength(contour, True)
+                    approx = cv2.approxPolyDP(contour, epsilon, True)
+                    # Add contour to rectangle list
+                    rectangles.append((np.mean(magnitude_spectrum), x, y, w, h))
+
+        return rectangles
 
     def show_stages(self, name_list, image_list):
         # Show stages of detection process
         x = 1
-        for image in image_list:
+        for image in image_list[:-1]:
             # Plot input image
             plt.subplot(2, 3, x)
             plt.imshow(image)
@@ -72,72 +75,124 @@ class BlurredFaceDetector:
 
         # Show final image
         plt.plot(150, 150)
-        plt.imshow(image)
+        plt.title(name_list[-1])
+        plt.imshow(image_list[-1])
         plt.show()
 
-    def process_image(self, filename):
+    def process_image(self, filename, image_num):
         # Load an input image
         image = cv2.imread(os.path.join(data_path, filename))
+        print(filename)
 
         # Determine size of the image
         height, width, _ = image.shape
 
         # Create an empty image
-        lines_image = np.zeros((height + 1, width + 1, 3), dtype=np.uint8)
+        empty_image = np.zeros((height + 1, width + 1, 3), dtype=np.uint8)
 
         # Convert image to grayscale
         gray_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
-        # Sharpen image
-        blurred_image = cv2.GaussianBlur(gray_image, (5, 5), 0)
-        sharpened_image = cv2.addWeighted(gray_image, 10, blurred_image, -9, 0)
+        # Apply adaptive Niblack thresholding
+        binary_niblack = cv2.ximgproc.niBlackThreshold(
+            gray_image, maxValue=255, type=cv2.THRESH_BINARY, blockSize=3, k=0.8
+        )
 
-        # Detect smooth spots on sharpened image
-        noise = canny(sharpened_image, sigma=1)
-
-        # Detect edges of smooth spots
-        edges = canny(opening(closing(noise, square(15)), square(10)), sigma=1)
-
-        # Detect horizontal and vertical lines
-        for i in range(10):
-            detector.probabilistic_hough_line(edges, lines_image)
-
-        gray_lines = cv2.cvtColor(lines_image, cv2.COLOR_RGB2GRAY)
+        # Detect edges on binary image
+        edges = canny(
+            opening(closing(binary_niblack, square(21)), square(10)), sigma=0.8
+        )
 
         # Connect separated lines
-        kernel = np.ones((5, 5), np.uint8)
-        dilate = cv2.dilate(gray_lines, kernel, iterations=5)
-        erode = cv2.erode(dilate, kernel, iterations=4)
+        kernel = np.ones((0, 0), np.uint8)
+
+        # Close huge gaps between lines
+        huge_dilate = cv2.dilate((edges.astype(np.uint8)) * 255, kernel, iterations=11)
+        huge_erode = cv2.erode(huge_dilate, kernel, iterations=4)
+
+        # Close small gaps between lines
+        small_dilate = cv2.dilate((edges.astype(np.uint8)) * 255, kernel, iterations=3)
+        small_erode = cv2.erode(small_dilate, kernel, iterations=2)
 
         # Find rectangles on image
-        detector.rectangles_outlines(erode, gray_image, image)
+        huge_rectangles = detector.rectangles_outlines(huge_erode, gray_image)
+        small_rectangles = detector.rectangles_outlines(small_erode, gray_image)
+        rectangles = huge_rectangles + small_rectangles
+
+        # Sort rectangles according to FFT magnitude
+        sorted_rectangles = sorted(rectangles, key=lambda item: item[0], reverse=True)
+
+        # Draw rectangles on image
+        if sorted_rectangles != []:
+            # Draw rectangles on empty image
+            for i in sorted_rectangles:
+                rectangles_image = cv2.rectangle(
+                    empty_image,
+                    (i[1], i[2]),
+                    (i[1] + i[3], i[2] + i[4]),
+                    (0, 255, 0),
+                    3,
+                )
+
+            # Detect all external contours
+            rectangles_image = cv2.cvtColor(rectangles_image, cv2.COLOR_BGR2GRAY)
+            contours, _ = cv2.findContours(
+                rectangles_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
+            )
+
+            face_num = 1
+
+            # Draw found contours on image
+            for contour in contours:
+                (x, y, w, h) = cv2.boundingRect(contour)
+                cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 3)
+
+                # Crop and save image to subfolder
+                cropped_image = image[3 + y : y + h - 6, 3 + x : x + w - 6]
+                type = filename.rsplit("_", 1)[-1]
+                print(
+                    data_path
+                    + f"\\blurred_faces\\image{image_num}_face{face_num}_{type}"
+                )
+                cv2.imwrite(
+                    data_path
+                    + f"\\blurred_faces\\image{image_num}_face{face_num}_{type}",
+                    cropped_image,
+                )
+                face_num += 1
+        else:
+            rectangles_image = empty_image
 
         # Show stages of detection process
         image_list = [
             cv2.cvtColor(gray_image, cv2.COLOR_BGR2RGB),
-            noise,
+            binary_niblack,
             edges,
-            gray_lines,
-            erode,
+            huge_erode,
+            small_erode,
+            rectangles_image,
             cv2.cvtColor(image, cv2.COLOR_BGR2RGB),
         ]
         name_list = [
             "Input grayscale",
-            "Smooth spots",
+            "Niblack thresholding",
             "Canny edges",
-            "Probabilistic Hough",
-            "Dilating & Eroding",
+            "Closing huge gaps",
+            "Closing small gaps",
+            "Found rectangles",
             "Final image",
         ]
         detector.show_stages(name_list, image_list)
 
     def run(self):
+        image_num = 0
         for filename in os.scandir(data_path):
             start_time = time.time()
             filename = os.path.basename(filename)
             if filename.endswith((".jpg", ".png", ".jpeg")):
-                self.process_image(filename)
+                self.process_image(filename, image_num)
             end_time = time.time()
+            image_num += 1
             print(f"Execution time: {end_time - start_time}")
 
 
