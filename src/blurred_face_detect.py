@@ -5,6 +5,7 @@ import os
 import time
 from skimage.feature import canny
 from skimage.morphology import opening, closing, square
+from skimage.filters import threshold_otsu
 
 
 class BlurredFaceDetector:
@@ -27,8 +28,7 @@ class BlurredFaceDetector:
 
             # Detect contours that are rectangles
             if (
-                len(approx)
-                == 4  # Check number of edges (rectangle should have 4 edges)
+                len(approx) == 4  # Check number of edges (rectangle should have 4 edges)
                 and (
                     w >= 40 and h >= 40
                 )  # Rectangles grater than or equal 40 x 40 pixels
@@ -50,12 +50,19 @@ class BlurredFaceDetector:
             ):
                 # Rectangle surrounding the blurred area
                 rectangle_area = gray_image[y : y + h, x : x + w]
+
+                # Analyze image sharpness using magnitude spectrum
                 fft_image = np.fft.fft2(rectangle_area)
                 fft_shifted = np.fft.fftshift(fft_image)
                 magnitude_spectrum = 20 * np.log(np.abs(fft_shifted))
-                if np.mean(magnitude_spectrum) > 95:
-                    epsilon = 0.05 * cv2.arcLength(contour, True)
-                    approx = cv2.approxPolyDP(contour, epsilon, True)
+
+                # Apply global Otsu thresholding
+                thresh_area = threshold_otsu(rectangle_area)
+                binary_area = rectangle_area > thresh_area
+                binary_area = binary_area.astype(np.uint8) * 255
+
+                # Ignore solid-colored areas with low magnitude spectrum
+                if (np.mean(magnitude_spectrum) > 95) and (np.sum(binary_area == 0) / binary_area.size < 0.8 and np.sum(binary_area == 255) / binary_area.size < 0.8):
                     # Add contour to rectangle list
                     rectangles.append((np.mean(magnitude_spectrum), x, y, w, h))
 
@@ -77,7 +84,7 @@ class BlurredFaceDetector:
         plt.plot(150, 150)
         plt.title(name_list[-1])
         plt.imshow(image_list[-1])
-        plt.show()
+        # plt.show()
 
     def process_image(self, filename, image_num):
         # Load an input image
@@ -150,10 +157,6 @@ class BlurredFaceDetector:
                 # Crop and save image to subfolder
                 cropped_image = image[3 + y : y + h - 6, 3 + x : x + w - 6]
                 type = filename.rsplit("_", 1)[-1]
-                print(
-                    data_path
-                    + f"\\blurred_faces\\image{image_num}_face{face_num}_{type}"
-                )
                 cv2.imwrite(
                     data_path
                     + f"\\blurred_faces\\image{image_num}_face{face_num}_{type}",
@@ -186,6 +189,8 @@ class BlurredFaceDetector:
 
     def run(self):
         image_num = 0
+        if not os.path.exists(data_path+"\\blurred_faces"):
+            os.makedirs(data_path+"\\blurred_faces")
         for filename in os.scandir(data_path):
             start_time = time.time()
             filename = os.path.basename(filename)
@@ -198,7 +203,8 @@ class BlurredFaceDetector:
 
 if __name__ == "__main__":
     data_path = input(
-        "Enter copied path to the folder where images with detected faces are stored: "
+        "Enter copied path to the folder " \
+        "where images with detected faces are stored: "
     )
     detector = BlurredFaceDetector(data_path)
     detector.run()
