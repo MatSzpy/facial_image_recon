@@ -12,6 +12,10 @@ class BlurredFaceDetector:
     def __init__(self, data_path):
         self.data_path = data_path
 
+    def save_list(self, file_path, files):
+        with open(file_path, mode="a+") as file:
+            file.write(", ".join(files) + "\n")
+
     def rectangles_outlines(self, erode, gray_image):
         # Detect all contours
         contours, _ = cv2.findContours(erode, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
@@ -20,11 +24,17 @@ class BlurredFaceDetector:
 
         # Filter rectangles from contours
         for contour in contours:
-            (x, y, w, h) = cv2.boundingRect(contour)
-
             # Specify number of edges
-            epsilon = 0.05 * cv2.arcLength(contour, True)
+            epsilon = 0.06 * cv2.arcLength(contour, True)
             approx = cv2.approxPolyDP(contour, epsilon, True)
+
+            (x, y, w, h) = cv2.boundingRect(approx)
+
+            image_x = gray_image.shape[1]
+            image_y = gray_image.shape[0]
+
+            contour_area = cv2.contourArea(approx)
+            coverage = contour_area / (w * h) if w * h > 0 else 0
 
             # Detect contours that are rectangles
             if (
@@ -33,16 +43,13 @@ class BlurredFaceDetector:
                     w >= 40 and h >= 40
                 )  # Rectangles grater than or equal 40 x 40 pixels
                 and (
-                    w < gray_image.shape[1] / 2 and h < gray_image.shape[0] / 2
-                )  # Rectangles with edges shorter than 1/2 of image width/height
-                and (
-                    w > gray_image.shape[0] / 20 and h > gray_image.shape[1] / 20
+                    w > image_y / 20 and h > image_x / 20
                 )  # Rectangles with edges greater than 1/20 of image width/height
                 and (
-                    x + w < gray_image.shape[1]
-                    and h + y < gray_image.shape[0]
-                    and x > 0
-                    and y > 0
+                    x + w < image_x - 15
+                    and h + y < image_y - 15
+                    and x > 15
+                    and y > 15
                 )  # Rectangles with edges that do not end or start at image edges
                 and (
                     ((w > h) and (w < 2 * h)) or ((w < h) and (h < 2 * w))
@@ -61,10 +68,28 @@ class BlurredFaceDetector:
                 binary_area = rectangle_area > thresh_area
                 binary_area = binary_area.astype(np.uint8) * 255
 
-                # Ignore solid-colored areas with low magnitude spectrum
-                if (np.mean(magnitude_spectrum) > 95) and (np.sum(binary_area == 0) / binary_area.size < 0.8 and np.sum(binary_area == 255) / binary_area.size < 0.8):
+                num_black_px = np.sum(binary_area == 0)
+                num_white_px = np.sum(binary_area == 255)
+
+                corners_x = [approx[i][0][0] for i in range(4)]
+                corners_y = [approx[i][0][1] for i in range(4)]
+                corners = [corners_x, corners_y]
+
+                counter = 0
+                for lst in corners:
+                    for i in lst:
+                        lst = lst[1:]
+                        for j in lst:
+                            if abs(i - j) < 6:
+                                counter += 1
+
+                if (np.mean(magnitude_spectrum) >= 95 and (num_black_px / binary_area.size <= 0.8 and num_white_px / binary_area.size <= 0.8) # Ignore solid-colored areas with low magnitude spectrum
+                        and coverage >= 0.6 # Object covers more more than 60% of the area
+                        and (cv2.minAreaRect(approx)[2] >= 80  or cv2.minAreaRect(approx)[2] <= 15) # Check if the rotation angle of the minimum area rectangle is near horizontal or vertical
+                ):
                     # Add contour to rectangle list
-                    rectangles.append((np.mean(magnitude_spectrum), x, y, w, h))
+                    if counter > 0:
+                        rectangles.append((np.mean(magnitude_spectrum), x, y, w, h))
 
         return rectangles
 
@@ -90,6 +115,7 @@ class BlurredFaceDetector:
         # Load an input image
         image = cv2.imread(os.path.join(data_path, filename))
         print(filename)
+        print("------------------------------------------------")
 
         # Determine size of the image
         height, width, _ = image.shape
@@ -105,13 +131,16 @@ class BlurredFaceDetector:
             gray_image, maxValue=255, type=cv2.THRESH_BINARY, blockSize=3, k=0.8
         )
 
-        # Detect edges on binary image
-        edges = canny(
-            opening(closing(binary_niblack, square(21)), square(10)), sigma=0.8
-        )
+        kernel = np.ones((3, 3), np.uint8)
 
-        # Connect separated lines
-        kernel = np.ones((0, 0), np.uint8)
+        # Detect edges on binary image
+        binary_niblack_clean = opening(
+            closing(binary_niblack, square(21)),
+            square(10)
+        )
+        dilated = cv2.dilate(binary_niblack_clean, kernel)
+        eroded = cv2.erode(binary_niblack_clean, kernel)
+        edges = cv2.subtract(dilated, eroded)
 
         # Close huge gaps between lines
         huge_dilate = cv2.dilate((edges.astype(np.uint8)) * 255, kernel, iterations=11)
@@ -143,28 +172,26 @@ class BlurredFaceDetector:
 
             # Detect all external contours
             rectangles_image = cv2.cvtColor(rectangles_image, cv2.COLOR_BGR2GRAY)
-            contours, _ = cv2.findContours(
-                rectangles_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
-            )
+            contours, _ = cv2.findContours(rectangles_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
 
             face_num = 1
 
             # Draw found contours on image
             for contour in contours:
                 (x, y, w, h) = cv2.boundingRect(contour)
-                cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 3)
+                cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
                 # Crop and save image to subfolder
-                cropped_image = image[3 + y : y + h - 6, 3 + x : x + w - 6]
-                type = filename.rsplit("_", 1)[-1]
-                cv2.imwrite(
-                    data_path
-                    + f"\\blurred_faces\\image{image_num}_face{face_num}_{type}",
-                    cropped_image,
-                )
+                coords = [2 + x, 2 + y, x + w - 4, y + h - 4]
+                cropped_image = image[coords[1]:coords[3], coords[0]:coords[2]]
+                original_filename, type = filename.rsplit("_", 1)
+                cropped_name = f"image{image_num}_face{face_num}_{type}"
+                coords = list(map(str, coords))
+                cv2.imwrite(data_path + f"\\blurred_faces_final\\{cropped_name}",cropped_image,)
+                self.save_list(data_path + f"\\blurred_faces_final\\cropped_images.txt",[original_filename + ".jpg", cropped_name] + coords)
                 face_num += 1
-        else:
-            rectangles_image = empty_image
+            else:
+                rectangles_image = empty_image
 
         # Show stages of detection process
         image_list = [
@@ -179,7 +206,7 @@ class BlurredFaceDetector:
         name_list = [
             "Input grayscale",
             "Niblack thresholding",
-            "Canny edges",
+            "Edges",
             "Closing huge gaps",
             "Closing small gaps",
             "Found rectangles",

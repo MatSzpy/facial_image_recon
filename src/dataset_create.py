@@ -124,15 +124,19 @@ class ImageModifier:
                 count_faces += 1
 
                 for key, param in modification_type.items():
+                    x, y, w, h = box
+                    roi = processed_images[key][y:y + h, x:x + w]
                     if "blur" in key:
-                        processed_images[key][box[1]:box[1] + box[3], box[0]:box[0] + box[2]] = cv2.blur(processed_images[key][box[1]:box[1]+box[3],box[0]:box[0]+box[2]], ((box[2]// param),(box[3]// param)))
+                        blur_w = max(1, w // param | 1)
+                        blur_h = max(1, h // param | 1)
+                        processed_images[key][y:y + h, x:x + w] = cv2.GaussianBlur(roi, (blur_w, blur_h))
                     elif "mosaic" in key:
                         pixels_x = param
-                        pixels_y = int(box[3] / (box[2] / pixels_x))
-                        processed_images[key][box[1]:box[1] + box[3], box[0]:box[0] + box[2]] = self.pixelate_face(processed_images[key][box[1]:box[1]+box[3],box[0]:box[0]+box[2]], pixels_x, pixels_y)
+                        pixels_y = max(1, int(h / (w / pixels_x )))
+                        processed_imagess [key][y:y+h, x:x+w] = self.pixelate_face(roi , pixels_x , pixels_y)
 
             if count_faces > 0:
-                subfolder = f"blurred_{count_faces}" if count_faces < 4 else "blurred_m"
+                subfolder = f"blurred_{count_faces}" if count_faces < 4 else "m"
 
                 for key, img in processed_images.items():
                     self.save_image(img, f"{os.path.splitext(filename)[0]}_{key}.jpg", subfolder)
